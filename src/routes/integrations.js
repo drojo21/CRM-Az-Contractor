@@ -161,7 +161,10 @@ function integrationsRouter({ db, config, anthropic }) {
     res.status(201).json({ recorded: results.filter(r => r.inserted).length, results });
   });
 
-  /** payment-server.js order shape: { orderId, businessName, contactName, email, phone, tradeType, serviceArea, packageType, amount, status? } */
+  /**
+   * payment-server.js order shape: { orderId, businessName, contactName, email, phone, tradeType,
+   * serviceArea, packageType, amount, status?, checkoutSessionId?, paymentId? }
+   */
   router.post('/orders', (req, res) => {
     const body = req.body || {};
     const out = db.tx(() => {
@@ -169,8 +172,8 @@ function integrationsRouter({ db, config, anthropic }) {
       const order = upsertOrder(db, {
         contractorId: contractor.id,
         reference: body.orderId || body.reference || null,
-        squareOrderId: body.squareOrderId || null,
-        squarePaymentId: body.squarePaymentId || null,
+        checkoutSessionId: body.checkoutSessionId || null,
+        paymentId: body.paymentId || null,
         packageType: body.packageType,
         amountCents: toCents(body.amount, body.packageType),
         status: body.status || 'pending',

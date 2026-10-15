@@ -19,7 +19,7 @@ async function startApp({ config: overrides = {}, ...deps } = {}) {
     baseUrl: 'http://crm.test',
     builderKey: BUILDER_KEY,
     ...overrides,
-    square: { ...base.square, webhookUrl: 'http://crm.test/hooks/square', ...(overrides.square || {}) },
+    stripe: { ...base.stripe, ...(overrides.stripe || {}) },
   };
   await createUser(db, ADMIN);
   const app = createApp({ db, config, log: silent, ...deps });

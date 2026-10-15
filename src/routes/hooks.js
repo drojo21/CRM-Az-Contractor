@@ -5,15 +5,15 @@ const { HttpError, notFound } = require('../errors');
 const { rateLimit } = require('../ratelimit');
 const { serializeContractor } = require('../contractors');
 const { parseLeadPayload, insertLead, contractorForBusinessName } = require('../leads');
-const { verifySquareSignature, handleSquareEvent } = require('../square');
+const { verifyStripeSignature, handleStripeEvent } = require('../stripe');
 
 /**
  * Public, unauthenticated endpoints:
  *   POST /hooks/leads/:key   quote forms on contractor websites (one key per contractor)
  *   POST /hooks/leads        same, matched by the "business" field, for sites without a key
- *   POST /hooks/square       Square payment webhooks (HMAC verified)
+ *   POST /hooks/stripe       Stripe webhooks (signature verified)
  */
-function hooksRouter({ db, config, notifier, fetchImpl, log }) {
+function hooksRouter({ db, config, notifier }) {
   const router = express.Router();
 
   const openCors = (req, res, next) => {
@@ -56,20 +56,16 @@ function hooksRouter({ db, config, notifier, fetchImpl, log }) {
     accept(req, res, contractorForBusinessName(db, payload.business || payload.businessName));
   });
 
-  router.post('/square', express.raw({ type: '*/*', limit: '256kb' }), async (req, res) => {
-    if (!config.square.webhookSignatureKey) throw new HttpError(503, 'SQUARE_WEBHOOK_SIGNATURE_KEY is not configured');
+  // Raw body: the signature covers the exact bytes Stripe sent
+  router.post('/stripe', express.raw({ type: '*/*', limit: '512kb' }), (req, res) => {
+    if (!config.stripe.webhookSecret) throw new HttpError(503, 'STRIPE_WEBHOOK_SECRET is not configured');
     const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
-    const ok = verifySquareSignature({
-      signatureKey: config.square.webhookSignatureKey,
-      notificationUrl: config.square.webhookUrl,
-      rawBody,
-      signature: req.get('x-square-hmacsha256-signature'),
-    });
-    if (!ok) throw new HttpError(401, 'Invalid Square signature');
+    const ok = verifyStripeSignature({ rawBody, header: req.get('stripe-signature'), secret: config.stripe.webhookSecret });
+    if (!ok) throw new HttpError(400, 'Invalid Stripe signature');
     let event;
     try { event = JSON.parse(rawBody); } catch { throw new HttpError(400, 'Invalid JSON'); }
-    const result = await handleSquareEvent(db, config, event, { fetchImpl, log });
-    res.json({ ok: true, ignored: !!result.ignored, orderId: result.order?.id });
+    const result = handleStripeEvent(db, event);
+    res.json({ received: true, ignored: !!result.ignored, orderId: result.order?.id });
   });
 
   return router;

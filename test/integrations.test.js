@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const Anthropic = require('@anthropic-ai/sdk');
-const { startApp, flush } = require('./helpers');
+const { startApp } = require('./helpers');
 
 const AnthropicClient = Anthropic.default || Anthropic;
 
@@ -189,7 +189,7 @@ test('payment-server orders: pending checkout, then paid, moves contractor to Pa
     assert.equal(pending.body.order.status, 'pending');
     assert.equal(pending.body.stage, 'prospect');
 
-    const paid = await t.integration('POST', '/api/integrations/orders', { ...order, status: 'paid', squarePaymentId: 'sq_pay_1' });
+    const paid = await t.integration('POST', '/api/integrations/orders', { ...order, status: 'paid', paymentId: 'pi_1', checkoutSessionId: 'cs_1' });
     assert.equal(paid.body.order.id, pending.body.order.id);
     assert.equal(paid.body.order.amount_cents, 37000);
     assert.equal(paid.body.stage, 'paid');
@@ -202,45 +202,111 @@ test('payment-server orders: pending checkout, then paid, moves contractor to Pa
   }
 });
 
-test('Square webhook: verifies the signature and records the paid order from order metadata', async () => {
-  const key = 'sq-signature-key';
-  const squareFetch = async url => {
-    assert.match(url, /connect\.squareupsandbox\.com\/v2\/orders\/sq_order_9$/);
-    return new Response(JSON.stringify({
-      order: {
-        id: 'sq_order_9', line_items: [{ name: 'Professional Website' }], total_money: { amount: 25000 },
-        metadata: { orderId: 'ACW-9', businessName: 'Catalina Roofing Co', email: 'ben@example.com', tradeType: 'roofing', packageType: 'website' },
+// ---------------------------------------------------------------- Stripe webhook
+
+const STRIPE_SECRET = 'whsec_crm_test';
+const stripeHeader = (raw, secret = STRIPE_SECRET) => {
+  const ts = Math.floor(Date.now() / 1000);
+  return `t=${ts},v1=${crypto.createHmac('sha256', secret).update(`${ts}.${raw}`).digest('hex')}`;
+};
+const postStripe = (t, event, secret) => {
+  const raw = JSON.stringify(event);
+  return t.request('POST', '/hooks/stripe', {
+    raw, headers: { 'content-type': 'application/json', 'stripe-signature': stripeHeader(raw, secret) },
+  });
+};
+// A Checkout Session as payment-server.js creates it
+const checkoutEvent = (type, session = {}) => ({
+  id: `evt_${crypto.randomBytes(4).toString('hex')}`, type,
+  data: {
+    object: {
+      id: 'cs_test_9', object: 'checkout.session', payment_status: 'paid', amount_total: 25000,
+      payment_intent: 'pi_9', client_reference_id: 'ACP-9', customer_details: { email: 'ben@example.com' },
+      metadata: {
+        orderId: 'ACP-9', businessName: 'Catalina Roofing Co', contactName: 'Ben Ortiz', email: 'ben@example.com',
+        phone: '520-555-0133', tradeType: 'roofing', serviceArea: 'Oro Valley, Tucson', packageType: 'website',
       },
-    }), { status: 200, headers: { 'content-type': 'application/json' } });
-  };
-  const t = await startApp({ config: { square: { webhookSignatureKey: key, accessToken: 'sq-token' } }, fetchImpl: squareFetch });
+      ...session,
+    },
+  },
+});
+
+test('Stripe webhook: verifies the signature and records the paid order from session metadata', async () => {
+  const t = await startApp({ config: { stripe: { webhookSecret: STRIPE_SECRET } } });
   try {
-    const event = {
-      type: 'payment.updated',
-      data: { object: { payment: { id: 'sq_pay_9', order_id: 'sq_order_9', status: 'COMPLETED', amount_money: { amount: 25000, currency: 'USD' } } } },
-    };
-    const raw = JSON.stringify(event);
-    const sign = body => crypto.createHmac('sha256', key).update('http://crm.test/hooks/square' + body).digest('base64');
+    const forged = await postStripe(t, checkoutEvent('checkout.session.completed'), 'whsec_attacker');
+    assert.equal(forged.status, 400);
+    assert.equal(t.db.get('SELECT COUNT(*) AS n FROM orders').n, 0);
 
-    const forged = await t.request('POST', '/hooks/square', { raw, headers: { 'content-type': 'application/json', 'x-square-hmacsha256-signature': 'nope' } });
-    assert.equal(forged.status, 401);
-
-    const ok = await t.request('POST', '/hooks/square', { raw, headers: { 'content-type': 'application/json', 'x-square-hmacsha256-signature': sign(raw) } });
+    const ok = await postStripe(t, checkoutEvent('checkout.session.completed'));
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     const order = t.db.get('SELECT * FROM orders');
     assert.equal(order.status, 'paid');
-    assert.equal(order.reference, 'ACW-9');
+    assert.equal(order.reference, 'ACP-9');
+    assert.equal(order.payment_id, 'pi_9');
+    assert.equal(order.checkout_session_id, 'cs_test_9');
     assert.equal(order.amount_cents, 25000);
+    assert.equal(order.description, 'Professional Website');
     const c = t.db.get('SELECT * FROM contractors WHERE id = ?', [order.contractor_id]);
     assert.equal(c.business_name, 'Catalina Roofing Co');
     assert.equal(c.stage, 'paid');
     assert.equal(c.trade, 'Roofing');
+    assert.equal(c.source, 'stripe');
 
-    // A late payment.created (APPROVED) must not undo "paid"
-    const late = JSON.stringify({ ...event, type: 'payment.created', data: { object: { payment: { ...event.data.object.payment, status: 'APPROVED' } } } });
-    await t.request('POST', '/hooks/square', { raw: late, headers: { 'content-type': 'application/json', 'x-square-hmacsha256-signature': sign(late) } });
+    // Redelivery and a late "expired" can't duplicate or undo a paid order
+    await postStripe(t, checkoutEvent('checkout.session.completed'));
+    await postStripe(t, checkoutEvent('checkout.session.expired', { payment_status: 'unpaid' }));
+    assert.equal(t.db.get('SELECT COUNT(*) AS n FROM orders').n, 1);
     assert.equal(t.db.get('SELECT status FROM orders').status, 'paid');
-    await flush();
+    assert.equal(t.db.get("SELECT COUNT(*) AS n FROM activities WHERE body LIKE 'Payment received%'").n, 1);
+
+    // Unrelated event types are acknowledged and ignored
+    const other = await postStripe(t, { id: 'evt_x', type: 'customer.created', data: { object: { id: 'cus_1' } } });
+    assert.equal(other.status, 200);
+    assert.equal(other.body.ignored, true);
+  } finally {
+    await t.close();
+  }
+});
+
+test('Stripe webhook and payment server report the same order: one row, then a refund', async () => {
+  const t = await startApp({ config: { stripe: { webhookSecret: STRIPE_SECRET } } });
+  try {
+    const meta = checkoutEvent('x').data.object.metadata;
+    // 1. payment-server.js: checkout started
+    await t.integration('POST', '/api/integrations/orders', { ...meta, amount: 250, status: 'pending', checkoutSessionId: 'cs_test_9' });
+    // 2. Stripe -> CRM directly (delayed method: completed but unpaid)
+    await postStripe(t, checkoutEvent('checkout.session.completed', { payment_status: 'unpaid', payment_intent: null }));
+    assert.equal(t.db.get('SELECT status FROM orders').status, 'pending');
+    // 3. Stripe -> CRM: the bank payment settled
+    await postStripe(t, checkoutEvent('checkout.session.async_payment_succeeded'));
+    // 4. payment-server.js: paid (after its own webhook)
+    await t.integration('POST', '/api/integrations/orders', { ...meta, amount: 250, status: 'paid', paymentId: 'pi_9', checkoutSessionId: 'cs_test_9' });
+    assert.equal(t.db.get('SELECT COUNT(*) AS n FROM orders').n, 1);
+    assert.equal(t.db.get('SELECT COUNT(*) AS n FROM contractors').n, 1);
+    assert.equal(t.db.get('SELECT status FROM orders').status, 'paid');
+
+    // Partial refund: logged, order stays paid. Full refund: order refunded.
+    await postStripe(t, { id: 'evt_r1', type: 'charge.refunded', data: { object: { id: 'ch_1', payment_intent: 'pi_9', amount_refunded: 5000, refunded: false } } });
+    assert.equal(t.db.get('SELECT status FROM orders').status, 'paid');
+    await postStripe(t, { id: 'evt_r2', type: 'charge.refunded', data: { object: { id: 'ch_1', payment_intent: 'pi_9', amount_refunded: 25000, refunded: true } } });
+    assert.equal(t.db.get('SELECT status FROM orders').status, 'refunded');
+    const log = t.db.all("SELECT body FROM activities WHERE kind = 'order' ORDER BY id").map(r => r.body);
+    assert.ok(log.some(b => b.startsWith('Partial refund, $50')));
+    assert.ok(log.some(b => b.startsWith('Refunded $250')));
+    // A retried "paid" report from days earlier can't undo the refund
+    await t.integration('POST', '/api/integrations/orders', { ...meta, status: 'paid', paymentId: 'pi_9' });
+    assert.equal(t.db.get('SELECT status FROM orders').status, 'refunded');
+  } finally {
+    await t.close();
+  }
+});
+
+test('Stripe webhook is off until the signing secret is set', async () => {
+  const t = await startApp();
+  try {
+    const res = await postStripe(t, checkoutEvent('checkout.session.completed'));
+    assert.equal(res.status, 503);
   } finally {
     await t.close();
   }

@@ -27,7 +27,7 @@ const CSP = [
 
 /**
  * deps (all optional, for tests): anthropic (Claude client), mailTransport (nodemailer-like),
- * fetchImpl (outbound fetch for lead forwarding and Square), log.
+ * fetchImpl (outbound fetch for lead forwarding), log.
  */
 function createApp({ db, config, anthropic, mailTransport, fetchImpl = fetch, log = console }) {
   const app = express();
@@ -47,7 +47,7 @@ function createApp({ db, config, anthropic, mailTransport, fetchImpl = fetch, lo
 
   app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-  // Public inbound endpoints parse their own bodies (text/plain leads, raw Square payloads)
+  // Public inbound endpoints parse their own bodies (text/plain leads, raw Stripe payloads)
   app.use('/hooks', hooksRouter(deps));
 
   app.use('/api', express.json({ limit: '5mb' }));

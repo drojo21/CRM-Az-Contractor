@@ -39,12 +39,8 @@ function loadConfig(env = process.env) {
     },
     adminNotifyEmail: env.ADMIN_NOTIFY_EMAIL || env.ADMIN_EMAIL || '',
 
-    square: {
-      webhookSignatureKey: env.SQUARE_WEBHOOK_SIGNATURE_KEY || '',
-      webhookUrl: env.SQUARE_WEBHOOK_URL || `${baseUrl}/hooks/square`,
-      accessToken: env.SQUARE_ACCESS_TOKEN || '',
-      environment: env.SQUARE_ENVIRONMENT === 'production' ? 'production' : 'sandbox',
-      apiVersion: env.SQUARE_API_VERSION || '2025-01-23',
+    stripe: {
+      webhookSecret: env.STRIPE_WEBHOOK_SECRET || '',
     },
   };
 }

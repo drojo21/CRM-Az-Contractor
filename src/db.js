@@ -153,6 +153,13 @@ const MIGRATIONS = [
     value TEXT NOT NULL
   );
   `,
+  // Payments moved from Square to Stripe
+  `
+  ALTER TABLE orders RENAME COLUMN square_order_id TO checkout_session_id;   -- Stripe cs_...
+  ALTER TABLE orders RENAME COLUMN square_payment_id TO payment_id;          -- Stripe pi_...
+  CREATE INDEX orders_checkout_session ON orders(checkout_session_id);
+  UPDATE contractors SET source = 'stripe' WHERE source = 'square';
+  `,
 ];
 
 function openDatabase(file) {

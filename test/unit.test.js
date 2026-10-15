@@ -8,7 +8,7 @@ const { inferTrade, normalizeTrade } = require('../src/trades');
 const { parseRocRoster, toCSV } = require('../src/csv');
 const { computeCost, normalizeUsage, DEFAULT_PRICING, validatePricing } = require('../src/usage');
 const { parseLeadPayload, normalizeLead } = require('../src/leads');
-const { verifySquareSignature } = require('../src/square');
+const { verifyStripeSignature } = require('../src/stripe');
 const { toCents } = require('../src/orders');
 
 test('normalizes the Site Builder work order shape', () => {
@@ -115,14 +115,21 @@ test('lead payloads: no-cors text/plain JSON, form encoding, aliases, spam', () 
   assert.equal(normalizeLead({ name: 'Bot', message: 'http://a http://b http://c http://d' }).spam, true);
 });
 
-test('Square signature verification', () => {
-  const key = 'sq-key';
-  const url = 'https://crm.example.com/hooks/square';
-  const body = '{"type":"payment.updated"}';
-  const signature = crypto.createHmac('sha256', key).update(url + body).digest('base64');
-  assert.equal(verifySquareSignature({ signatureKey: key, notificationUrl: url, rawBody: body, signature }), true);
-  assert.equal(verifySquareSignature({ signatureKey: key, notificationUrl: url, rawBody: body + ' ', signature }), false);
-  assert.equal(verifySquareSignature({ signatureKey: key, notificationUrl: url, rawBody: body, signature: '' }), false);
+test('Stripe signature verification', () => {
+  const secret = 'whsec_test';
+  const body = '{"id":"evt_1","type":"checkout.session.completed"}';
+  const t = Math.floor(Date.now() / 1000);
+  const sig = (ts, b = body, s = secret) => crypto.createHmac('sha256', s).update(`${ts}.${b}`).digest('hex');
+  const verify = (header, rawBody = body) => verifyStripeSignature({ rawBody, header, secret });
+
+  assert.equal(verify(`t=${t},v1=${sig(t)}`), true);
+  // Stripe sends several v1 signatures while a secret is being rolled
+  assert.equal(verify(`t=${t},v1=${sig(t, body, 'whsec_old')},v1=${sig(t)},v0=abc`), true);
+  assert.equal(verify(`t=${t},v1=${sig(t)}`, body + ' '), false, 'body changed');
+  assert.equal(verify(`t=${t},v1=${sig(t, body, 'whsec_wrong')}`), false, 'wrong secret');
+  assert.equal(verify(`t=${t - 600},v1=${sig(t - 600)}`), false, 'replayed old event');
+  assert.equal(verify(`v1=${sig(t)}`), false, 'no timestamp');
+  assert.equal(verify(''), false);
 });
 
 test('order amounts', () => {

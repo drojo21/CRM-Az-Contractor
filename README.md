@@ -9,7 +9,7 @@ It plugs into the two existing pieces:
 | Repo | What it does | How the CRM connects |
 |---|---|---|
 | [`acp-backend-tucson`](https://github.com/drojo21/acp-backend-tucson) | Site Builder (`builder.html`): work order → Claude copy → single-file site → Netlify | Builder syncs each contractor + published site; copy generation goes through the CRM's AI proxy so tokens are billed per contractor |
-| [`Az-Contractor-Pro`](https://github.com/drojo21/Az-Contractor-Pro) | Marketing site + `payment-server.js` (Square checkout for the $250 / $120 / $370 packages) | Orders are posted to the CRM, or Square webhooks go straight to it |
+| [`Az-Contractor-Pro`](https://github.com/drojo21/Az-Contractor-Pro) | Marketing site + `payment-server.js` (Stripe Checkout for the $250 / $120 / $370 packages) | The payment server reports every order; optionally a Stripe webhook goes straight to the CRM too |
 | Every generated contractor site | Quote form posts to `sheet` (the builder's "Lead capture URL") | Point it at the contractor's CRM lead URL; leads land in the CRM and get emailed to the contractor |
 
 ## What's in it
@@ -25,7 +25,7 @@ It plugs into the two existing pieces:
 - **Leads**: each contractor gets a private lead capture URL. The quote form on their site posts to it and
   the lead shows up in the inbox, gets emailed to the contractor (BCC you), and can also be forwarded to their
   existing Apps Script sheet. Statuses: new, contacted, won, lost, spam.
-- **Orders**: packages and prices from the marketing site; from the payment server, Square webhooks, or recorded by hand.
+- **Orders**: packages and prices from the marketing site; from the payment server, Stripe webhooks (including refunds), or recorded by hand.
 - **Token usage**: every Claude call billed to a contractor with model, input/output/cache tokens and cost.
   Monthly chart, per-contractor cost against what they've paid, optional monthly token budget that the
   AI proxy enforces. Model prices are editable in Settings.
@@ -45,7 +45,7 @@ The first start creates the admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`. More pe
 Settings → Team, or with `npm run create-user -- someone@example.com 'a long password' "Their Name"`.
 
 ```bash
-npm test                    # 28 tests: unit, admin API, integrations, public hooks
+npm test                    # 30 tests: unit, admin API, integrations, public hooks
 npm run dev                 # restart on file changes
 ```
 
@@ -69,24 +69,33 @@ and form posts). No change to the site template is needed.
 
 ### 2. Site Builder (`builder.html`)
 
-Create an API key in Settings, put it in the builder's **Builder key** field, and apply the snippet from
-Settings → "Hook up the Site Builder". It adds:
+The hookup is built into `builder.html`. Create an API key in Settings, then fill in the builder's
+section **6 · CRM** with this CRM's URL and the key (they're remembered in that browser only). From then on:
 
-1. `crmPrepare(d)` before building (single build and roster batch): creates/updates the contractor and fills
-   in their lead capture URL.
-2. `ask()` calls `POST /api/integrations/ai/messages` instead of `api.anthropic.com`, with
-   `acp: { roc, businessName }`. Same request and response shape as the Messages API, so the rest of the builder
-   is unchanged, the Claude key stays on the server, and every token is attributed.
-3. `crmSync({ site: out })` after publishing: records the Netlify site id, URL and claim link.
+1. Before each build (single or roster batch) the contractor is created/updated and the quote form is
+   pointed at their CRM lead URL. A CRM URL left over from the previous contractor is replaced; a custom
+   Apps Script URL is kept.
+2. Copy generation calls `POST /api/integrations/ai/messages` instead of `api.anthropic.com`, with
+   `acp: { roc, businessName, purpose }`. Same request and response shape as the Messages API, so the
+   Claude key stays on the server and every token is attributed.
+3. After publishing, the Netlify site id, URL and claim link are recorded, and a **CRM** link appears
+   next to the live URL.
 
-### 3. Payment server and Square
+Leave the CRM URL blank and the builder works exactly as before.
 
-Either add the small `notifyCrm()` helper from Settings to `payment-server.js` (posts to
-`/api/integrations/orders` when a checkout is created and when it's paid), or point a Square webhook
-subscription at `https://crm.example.com/hooks/square` for `payment.created` and `payment.updated`
-and set `SQUARE_WEBHOOK_SIGNATURE_KEY` + `SQUARE_ACCESS_TOKEN`. The CRM verifies the HMAC signature,
-fetches the order to read the metadata `payment-server.js` attaches at checkout (business name, package,
-order id), and records the payment. Late or out-of-order events never undo a paid order.
+### 3. Payment server and Stripe
+
+`payment-server.js` takes payment with Stripe Checkout. Set `CRM_URL` and `CRM_KEY` (an API key from
+Settings) in its `.env` and it reports each order when checkout starts and again when Stripe confirms
+the payment.
+
+Optionally, also add a Stripe webhook endpoint for `https://crm.example.com/hooks/stripe` with
+`checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, `checkout.session.expired` and `charge.refunded`, and put its
+signing secret in `STRIPE_WEBHOOK_SECRET`. The CRM verifies the signature, reads the business name and
+package from the session metadata the payment server attaches (no Stripe API key needed), and records
+refunds. Both paths converge on one order, matched by order id, payment intent or checkout session.
+Duplicate and out-of-order events never undo a paid order, and a refund is final.
 
 ## API
 
@@ -97,12 +106,12 @@ They allow CORS from any origin since the builder runs in a browser tab; auth is
 |---|---|---|---|
 | POST | `/hooks/leads/:key` | none (key in URL) | Quote form submissions from a contractor site |
 | POST | `/hooks/leads` | none | Same, matched by business name |
-| POST | `/hooks/square` | Square HMAC | Square payment webhooks |
+| POST | `/hooks/stripe` | Stripe signature | Stripe Checkout and refund webhooks |
 | GET | `/api/integrations/ping` | API key | Check a key works |
 | POST | `/api/integrations/builder/sync` | API key | `{ contractor, site?, usage? }`: upsert contractor, record deploy; returns `leadCaptureUrl` |
 | POST | `/api/integrations/ai/messages` | API key | Claude Messages API proxy (non-streaming); attribution via `acp` or `x-contractor-roc` / `x-contractor-id` |
 | POST | `/api/integrations/usage` | API key | Report usage for calls made elsewhere: one event or `{ events: [...] }` |
-| POST | `/api/integrations/orders` | API key | Order from the payment server (`orderId, businessName, …, packageType, amount, status`) |
+| POST | `/api/integrations/orders` | API key | Order from the payment server (`orderId, businessName, …, packageType, amount, status, checkoutSessionId, paymentId`) |
 | GET | `/health` | none | Health check |
 
 Everything under `/api/*` other than these is the CRM UI's own API (session cookie + `X-Requested-With: acp-crm`).
@@ -136,7 +145,7 @@ The CRM is a normal Node server with a SQLite file, so it needs a host with a pe
 - Back up the database file (or the whole volume) on a schedule. SQLite runs in WAL mode; copy
   `crm.db` together with its `-wal` file, or use `sqlite3 crm.db ".backup backup.db"`.
 
-`BASE_URL` matters: lead capture URLs and the Square webhook URL are built from it. If you move domains,
+`BASE_URL` matters: lead capture URLs and the Stripe webhook URL are built from it. If you move domains,
 republish the sites with the new lead URLs.
 
 ## Security notes
@@ -148,7 +157,7 @@ republish the sites with the new lead URLs.
   public forms. CSV exports neutralize spreadsheet formulas.
 - Public lead endpoints are rate limited per IP (20 per 10 minutes) and have a honeypot (`_gotcha`).
   Login is rate limited too. The limiter is in-memory, so it's per instance.
-- Square webhooks are rejected unless the signature key is set and the signature matches.
+- Stripe webhooks are rejected unless the signing secret is set and the signature matches (stale timestamps too).
 
 ## Layout
 
@@ -162,7 +171,7 @@ src/
   usage.js           model pricing, cost calculation, usage summaries
   orders.js          packages, order upsert
   websites.js        deploy recording
-  square.js          webhook signature + order lookup
+  stripe.js          webhook signature check, checkout and refund events
   notify.js          lead emails and forwarding
   auth.js            passwords, sessions, API keys
   csv.js, trades.js  ROC CSV parsing and trade inference (ported from builder.html)

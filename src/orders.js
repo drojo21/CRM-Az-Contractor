@@ -26,9 +26,12 @@ function toCents(amount, packageType) {
 }
 
 /**
- * Create or update an order, matched by reference, then Square payment id, then Square order id.
- * A paid order moves the contractor to the Paid stage. Status never regresses from paid to pending,
- * because Square can deliver payment.created after payment.updated.
+ * Create or update an order, matched by reference (the order form's ACP-... id), then Stripe
+ * payment intent, then Stripe checkout session. The payment server and the CRM's own Stripe
+ * webhook can both report the same order; they converge on one row.
+ * A paid order moves the contractor to the Paid stage. Integrations can't move a paid order back
+ * to pending or canceled (webhooks arrive out of order and get retried), and a refund is final;
+ * only an admin can change it.
  */
 function upsertOrder(db, o) {
   const packageType = PACKAGES[o.packageType] ? o.packageType : 'custom';
@@ -36,16 +39,17 @@ function upsertOrder(db, o) {
   return db.tx(() => {
     const existing =
       (o.reference && db.get('SELECT * FROM orders WHERE reference = ?', [o.reference])) ||
-      (o.squarePaymentId && db.get('SELECT * FROM orders WHERE square_payment_id = ?', [o.squarePaymentId])) ||
-      (o.squareOrderId && db.get('SELECT * FROM orders WHERE square_order_id = ?', [o.squareOrderId])) ||
+      (o.paymentId && db.get('SELECT * FROM orders WHERE payment_id = ?', [o.paymentId])) ||
+      (o.checkoutSessionId && db.get('SELECT * FROM orders WHERE checkout_session_id = ?', [o.checkoutSessionId])) ||
       null;
-    if (existing && existing.status === 'paid' && status === 'pending') status = 'paid';
+    if (existing?.status === 'refunded') status = 'refunded';
+    else if (existing?.status === 'paid' && ['pending', 'canceled'].includes(status)) status = 'paid';
     const becamePaid = status === 'paid' && (!existing || existing.status !== 'paid');
     const params = {
       contractor_id: o.contractorId ?? existing?.contractor_id ?? null,
       reference: o.reference || existing?.reference || null,
-      square_order_id: o.squareOrderId || existing?.square_order_id || null,
-      square_payment_id: o.squarePaymentId || existing?.square_payment_id || null,
+      checkout_session_id: o.checkoutSessionId || existing?.checkout_session_id || null,
+      payment_id: o.paymentId || existing?.payment_id || null,
       package_type: o.packageType ? packageType : existing?.package_type || packageType,
       description: o.description ?? existing?.description ?? PACKAGES[packageType].label,
       amount_cents: o.amountCents ?? existing?.amount_cents ?? 0,
@@ -56,14 +60,14 @@ function upsertOrder(db, o) {
     let id;
     if (existing) {
       id = existing.id;
-      db.run(`UPDATE orders SET contractor_id = :contractor_id, reference = :reference, square_order_id = :square_order_id,
-                square_payment_id = :square_payment_id, package_type = :package_type, description = :description,
+      db.run(`UPDATE orders SET contractor_id = :contractor_id, reference = :reference, checkout_session_id = :checkout_session_id,
+                payment_id = :payment_id, package_type = :package_type, description = :description,
                 amount_cents = :amount_cents, status = :status, paid_at = :paid_at, updated_at = :now WHERE id = :id`,
       { ...params, id });
     } else {
-      id = db.run(`INSERT INTO orders (contractor_id, reference, square_order_id, square_payment_id, package_type,
+      id = db.run(`INSERT INTO orders (contractor_id, reference, checkout_session_id, payment_id, package_type,
                      description, amount_cents, status, paid_at)
-                   VALUES (:contractor_id, :reference, :square_order_id, :square_payment_id, :package_type,
+                   VALUES (:contractor_id, :reference, :checkout_session_id, :payment_id, :package_type,
                      :description, :amount_cents, :status, :paid_at)`, params).lastInsertRowid;
     }
     if (params.contractor_id) {

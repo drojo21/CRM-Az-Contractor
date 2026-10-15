@@ -24,10 +24,10 @@ export async function render(ctx) {
           <td>${o.description || pkg(o.package_type)}</td>
           <td class="r tnum">${money(o.amount_cents)}</td>
           <td><select data-order="${o.id}" aria-label="Order status">${options(ctx.meta.orderStatuses, o.status)}</select></td>
-          <td class="small muted">${o.reference || ''}${o.square_payment_id ? html`<div title="Square payment id">${o.square_payment_id}</div>` : ''}</td>
+          <td class="small muted">${o.reference || ''}${o.payment_id ? html`<div title="Stripe payment">${o.payment_id}</div>` : ''}</td>
         </tr>`)}</tbody>
     </table></div>`
-      : empty('No orders yet', 'Orders arrive from the order form (payment server), straight from Square webhooks, or when you record a payment on a contractor.')}
+      : empty('No orders yet', 'Orders arrive from the order form (payment server), straight from Stripe webhooks, or when you record a payment on a contractor.')}
   `);
 
   on(ctx.root, 'change', '[data-order]', async (e, el) => {

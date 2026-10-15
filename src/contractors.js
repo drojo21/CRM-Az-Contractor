@@ -194,7 +194,7 @@ function createContractor(db, fields, { source = 'manual', userId = null } = {})
 
 const SOURCE_LABEL = {
   manual: 'the CRM', builder: 'the Site Builder', roc_import: 'an ROC roster import',
-  square: 'a Square payment', payment_server: 'the order form',
+  stripe: 'a Stripe payment', payment_server: 'the order form',
 };
 
 function updateContractor(db, id, fields, { userId = null } = {}) {
